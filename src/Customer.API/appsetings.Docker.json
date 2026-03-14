@@ -1,0 +1,33 @@
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning"
+    }
+  },
+  "AllowedHosts": "*",
+  "Kafka": {
+    "BootstrapServers": "ms_kafka:9092",
+    "Topic": ["payment-success", "payment-failed"],
+    "GroupId": "customer-service-group"
+  },
+  "ConnectionStrings": {
+    "DefaultConnection": "Host=posgres;Port=5432;Username=johnny;Password=johnny123;Database=customers;"
+  },
+  "spring": {
+    "application": {
+      "name": "discovery-server"
+    }
+  },
+  "eureka": {
+    "client": {
+      "serviceUrl": "http://eureka-server:8761/eureka/",
+      "shouldRegisterWithEureka": true,
+      "shouldFetchRegistry": false,
+      "validateCertificates": false
+    },
+    "instance": {
+      "port": 8030
+    }
+  }
+}
