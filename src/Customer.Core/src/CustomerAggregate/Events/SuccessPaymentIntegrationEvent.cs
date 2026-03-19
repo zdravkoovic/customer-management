@@ -8,4 +8,9 @@ public class SuccessPaymentIntegrationEvent(Guid aggregateId, Guid customerId, d
     public decimal Amount { get; } = amount;
     public DateTime PaymentDate { get; } = paymentDate;
     public int OrderId { get; init; }
+
+    public override string ToJson()
+    {
+        throw new NotImplementedException();
+    }
 }

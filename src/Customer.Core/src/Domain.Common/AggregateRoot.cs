@@ -32,4 +32,5 @@ public abstract class AggregateRoot<TModel> : Entity<TModel>, IAggregateRoot
         domainEvent.EnsureNonNull();
         _domainEvents.Add(domainEvent);
     }
+
 }

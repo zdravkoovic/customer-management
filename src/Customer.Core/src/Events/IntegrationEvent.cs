@@ -12,7 +12,7 @@ public abstract class IntegrationEvent : IIntegrationEvent
 
     public Guid AggregateId { get; set; } // Identifier of the related aggregate
 
-    protected IntegrationEvent(Guid aggregateId)
+    public IntegrationEvent(Guid aggregateId)
     {
         if (aggregateId == Guid.Empty)
         {
@@ -22,4 +22,6 @@ public abstract class IntegrationEvent : IIntegrationEvent
         AggregateId = aggregateId;
         EventType = GetType().Name; // Use the class name as the event type
     }
+
+    public abstract string ToJson();
 }

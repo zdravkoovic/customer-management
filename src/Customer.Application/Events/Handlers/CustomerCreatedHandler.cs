@@ -8,15 +8,12 @@ namespace Customer.Application.Events.Handlers;
 
 public class CustomerCreatedHandler : IDomainEventHandler<CustomerCreatedEvent>
 {
-    private readonly IIntegrationEventPublisher _integrationEventPublisher;
     private readonly IEmailSender _sender;
 
     public CustomerCreatedHandler(
-        IIntegrationEventPublisher integrationEventPublisher,
         IEmailSender sender
     )
     {
-        _integrationEventPublisher = integrationEventPublisher;
         _sender = sender;
     }
     public async Task Handle(CustomerCreatedEvent domainEvent, CancellationToken cancellationToken)

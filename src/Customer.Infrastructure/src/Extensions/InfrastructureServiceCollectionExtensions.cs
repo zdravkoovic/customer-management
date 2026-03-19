@@ -2,6 +2,7 @@ using Confluent.Kafka;
 using Customer.Application.Abstractions.Messaging;
 using Customer.Application.Customer.Repositories;
 using Customer.Core.src.Interfaces;
+using Customer.Infrastructure.Persistance.Repositories;
 using Customer.Infrastructure.src.Email;
 using Customer.Infrastructure.src.Messaging.Kafka;
 using Customer.Infrastructure.src.Persistance;
@@ -36,30 +37,48 @@ public static class InfrastructureServiceExtensions
 
         services.AddScoped<ICustomerRepository, CustomerRepository>();
         services.AddScoped<IUnitOfWork, UnitOfWork>();
+        services.AddScoped<IIntegrationEventLog, IntegrationEventLog>();
         
         services.AddAutoMapper(cfg => {}, typeof(InfrastructureServiceExtensions).Assembly);
 
         var kafkaConfig = configuration.GetSection("Kafka");
+        var topics = kafkaConfig.GetSection("Topics")
+            .Get<Dictionary<string, string>>() ?? new Dictionary<string, string>();
+        
+        services.AddSingleton(topics);
 
         services.AddSingleton(sp =>
         {
            var config = new ConsumerConfig
-           {
+            {
                 BootstrapServers = kafkaConfig["BootstrapServers"],
                 GroupId = kafkaConfig["GroupId"],
                 AutoOffsetReset = AutoOffsetReset.Earliest,
                 EnableAutoCommit = false  
-           };
+            };
 
            return new ConsumerBuilder<string, string>(config).Build();
         });
 
         services.AddHostedService<KafkaIntegrationEventConsumer>();
 
-        services.AddScoped<IIntegrationEventPublisher>(sp =>
+        services.AddSingleton(sp =>
         {
-            return new KafkaIntegrationEventPublisher(kafkaConfig["BootstrapServers"]!, kafkaConfig["Topic"]!);
+            var config = new ProducerConfig
+            {
+                BootstrapServers = kafkaConfig["BootstrapServers"],
+                Acks = Acks.All,
+                EnableIdempotence = true,
+                MessageSendMaxRetries = 5,
+                LingerMs = 5,
+                BatchSize = 32 * 1024  
+            };
+
+            return new ProducerBuilder<string, string>(config).Build();
         });
+
+        services.AddHostedService<KafkaIntegrationEventPublisher>();
+
 
         services.AddScoped<IEmailSender, MimeKitEmailSender>();
         

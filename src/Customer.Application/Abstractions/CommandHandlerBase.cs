@@ -34,6 +34,8 @@ public abstract class CommandHandlerBase<TCommand, TResponse> : ICommandHandler<
             return operationResult;
         }
 
+        await SaveIntegrationEventsAsync(cancellationToken);
+
         await _unitOfWork.SaveChangeAsync(cancellationToken);
 
         var aggregateRoot = GetAggregateRoot(operationResult);
@@ -50,6 +52,8 @@ public abstract class CommandHandlerBase<TCommand, TResponse> : ICommandHandler<
     protected abstract Task<Result<TResponse, IDomainError>> ExecuteAsync(TCommand request, CancellationToken cancellationToken);
 
     protected abstract IAggregateRoot? GetAggregateRoot(Result<TResponse, IDomainError> result);
+
+    protected abstract Task SaveIntegrationEventsAsync(CancellationToken cancellationToken);
 
     protected async Task DispatchDomainEventAsync(IEnumerable<IDomainEvent> domainEvents, CancellationToken cancellationToken)
     {

@@ -2,80 +2,145 @@ using System.Text.Json;
 using Confluent.Kafka;
 using Customer.Application.Abstractions.Messaging;
 using Customer.Core.src.Events;
+using Customer.Infrastructure.src.Persistance;
+using Customer.Infrastructure.src.Persistance.Model;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 
 namespace Customer.Infrastructure.src.Messaging.Kafka;
 
-public class KafkaIntegrationEventPublisher : IIntegrationEventPublisher
+public class KafkaIntegrationEventPublisher : BackgroundService
 {
+    private readonly IServiceProvider _serviceProvider;
+    private readonly ILogger<KafkaIntegrationEventPublisher> _logger;
     private readonly IProducer<string, string> _producer;
-    private readonly string _defaultTopic;
+    private readonly Dictionary<string, string> _topics;
 
-    public KafkaIntegrationEventPublisher(string bootstrapServers, string topic)
+    private const int BatchSize = 20;
+    private static readonly TimeSpan PollDelayWhenIdle = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan DefaultLockDuration = TimeSpan.FromSeconds(30);
+    private const int MaxAttempts = 5;
+
+    public KafkaIntegrationEventPublisher(
+        IServiceProvider serviceProvider,
+        ILogger<KafkaIntegrationEventPublisher> logger,
+        IProducer<string, string> producer,
+        Dictionary<string, string> topics
+    )
     {
-        var config = new ProducerConfig
-        {
-            BootstrapServers = bootstrapServers,
-            Acks = Acks.All, // Ensure all replicas acknowledge
-            EnableIdempotence = true, // Ensure exactly-once delivery
-            CompressionType = CompressionType.Snappy, // Optimize message size
-            LingerMs = 5 // Reduce latency, Batch messages for better throughput
-        };
-
-        _producer = new ProducerBuilder<string, string>(config).Build();
-        _defaultTopic = topic;
+        _serviceProvider = serviceProvider;
+        _logger = logger;
+        _producer = producer;
+        _topics = topics;
     }
 
-    public async Task PublishAsync<TEvent>(TEvent @event,CancellationToken cancellationToken = default) where TEvent : IntegrationEvent
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var topic = _defaultTopic ?? @event.GetType().Name;
-
-        var message = JsonSerializer.Serialize(@event);
-
-        try
+        _logger.LogInformation("KafkaIntegrationEventPublisher started.");
+        while(!stoppingToken.IsCancellationRequested)
         {
-            var kafkaMessage = new Message<string, string>
+            using var scope = _serviceProvider.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+
+            var now = DateTime.UtcNow;
+            
+            var candidates = await db.OutboxEvents
+                .Where(o => o.ProcessedAt == null && (o.LockedUntil == null || o.LockedUntil < now))
+                .OrderBy(o => o.OccurredAt)
+                .Take(BatchSize * 3)
+                .ToListAsync(stoppingToken);
+            
+            if(candidates.Count() == 0)
             {
-                Key = @event.AggregateId.ToString(),
-                Value = message
-            };
+                await Task.Delay(PollDelayWhenIdle, stoppingToken);
+                continue;
+            }
 
-            var deliveryResult = await _producer.ProduceAsync(topic, kafkaMessage);
-
-            Console.WriteLine($"Delivered event to Kafka: {deliveryResult.TopicPartitionOffset}");
-        }
-        catch (ProduceException<string, string> ex)
-        {
-            Console.WriteLine($"Failed to deliver event to Kafka: {ex.Error.Reason}");
-            throw;
-        }
-    }
-
-    public async Task PublishAsync<T>(T @event) where T : IntegrationEvent
-    {
-        // Determine the topic based on the event type
-            var topic = _defaultTopic ?? @event.GetType().Name;
-
-            // Serialize the event to JSON
-            var message = JsonSerializer.Serialize(@event);
-
-            try
+            var claimed = new List<OutboxEvent>();
+            foreach(var candidate in candidates)
             {
-                // Produce the message
-                var kafkaMessage = new Message<string, string>
+                if(claimed.Count >= BatchSize) break;
+
+                var newLockUntil = DateTime.UtcNow.Add(DefaultLockDuration);
+
+                var rows = await db.Database.ExecuteSqlInterpolatedAsync($@"
+                    UPDATE ""OutboxEvents""
+                    SET ""LockedUntil"" = {newLockUntil}, ""AttemptCount"" = ""AttemptCount"" + 1
+                    WHERE ""Id"" = {candidate.Id} AND ""ProcessedAt"" IS NULL AND (""LockedUntil"" IS NULL OR ""LockedUntil"" < {now})",
+                    cancellationToken: stoppingToken
+                );
+                if(rows == 1)
                 {
-                    Key = @event.AggregateId.ToString(),
-                    Value = message
-                };
-
-                var deliveryResult = await _producer.ProduceAsync(topic, kafkaMessage);
-
-                Console.WriteLine($"Delivered event to Kafka: {deliveryResult.TopicPartitionOffset}");
+                    var claimedRow = await db.OutboxEvents.FirstOrDefaultAsync(o => o.Id == candidate.Id, stoppingToken);
+                    if(claimedRow != null) claimed.Add(claimedRow);
+                }
             }
-            catch (ProduceException<string, string> ex)
+
+            if(claimed.Count == 0)
             {
-                // Log the exception or handle it as per your needs
-                Console.WriteLine($"Failed to deliver event: {ex.Message}");
-                throw;
+                await Task.Delay(TimeSpan.FromMicroseconds(200), stoppingToken);
+                continue;
             }
+
+            foreach(var ev in claimed)
+            {
+                try
+                {
+                    if(ev.AttemptCount > MaxAttempts)
+                    {
+                        ev.Error = $"Exceeded max attempts ({ev.AttemptCount}).";
+                        ev.LockedUntil = null;
+                        db.OutboxEvents.Update(ev);
+                        await db.SaveChangesAsync(stoppingToken);
+                        continue;
+                    }
+
+                    if (!_topics.TryGetValue(ev.Type, out var topic))
+                    {
+                        _logger.LogWarning("No topic mapping found for {EventType}", ev.Type);
+                        continue;
+                    }
+
+                    var message = new Message<string, string>
+                    {
+                        Key = ev.Id.ToString(),
+                        Value = ev.Payload,
+                        Headers = new Headers
+                        {
+                            {"message-id", System.Text.Encoding.UTF8.GetBytes(ev.Id.ToString())},
+                            {"event-type", System.Text.Encoding.UTF8.GetBytes(ev.Type)}
+                        }
+                    };
+
+                    var delivery = await _producer.ProduceAsync(topic, message, stoppingToken);
+
+                    ev.ProcessedAt = DateTime.UtcNow;
+                    ev.Error = null;
+                    ev.LockedUntil = null;
+                    await db.SaveChangesAsync(stoppingToken);
+
+                    _logger.LogInformation(
+                        "Published OutboxEvent {Id} to {Topic} partition {Partition} offset {Offset}",
+                        ev.Id, topic, delivery.Partition.Value, delivery.Offset.Value);
+                }
+                catch(ProduceException<string, string> pex)
+                {
+                    ev.Error = pex.Error.Reason;
+                    ev.LockedUntil = DateTime.UtcNow.AddSeconds(Math.Min(30, 2 * ev.AttemptCount));
+                    db.OutboxEvents.Update(ev);
+                    await db.SaveChangesAsync(stoppingToken);
+                    _logger.LogError(pex, "Kafka produce failed for OutboxEvent {Id}", ev.Id);
+                }
+                catch(Exception ex)
+                {
+                    ev.Error = ex.Message;
+                    ev.LockedUntil = DateTime.UtcNow.AddSeconds(Math.Min(30, 2 * ev.AttemptCount));
+                    await db.SaveChangesAsync(stoppingToken);
+                    _logger.LogError(ex, "Unexpected error publishing OutboxEvent {Id}", ev.Id);
+                }
+            }
+        }
     }
 }

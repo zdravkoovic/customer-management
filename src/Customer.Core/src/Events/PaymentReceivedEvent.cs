@@ -18,4 +18,9 @@ public class PaymentReceivedEvent : IIntegrationEvent
     public required string CustomerFirstname { get; init; }
     public required string CustomerLastname { get; init; }
     public required string CustomerEmail { get; init; }
+
+    public string ToJson()
+    {
+        throw new NotImplementedException();
+    }
 }

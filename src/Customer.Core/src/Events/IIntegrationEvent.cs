@@ -7,4 +7,6 @@ public interface IIntegrationEvent
     Guid Id { get; }
     DateTimeOffset OccurredOn { get; }
     Guid AggregateId { get; }
+
+    public string ToJson();
 }

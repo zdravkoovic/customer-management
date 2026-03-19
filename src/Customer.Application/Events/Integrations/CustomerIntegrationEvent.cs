@@ -12,4 +12,9 @@ public sealed class CustomerIntegrationEvent : IntegrationEvent
     }
 
     public Guid CustomerId { get; }
+
+    public override string ToJson()
+    {
+        throw new NotImplementedException();
+    }
 }
